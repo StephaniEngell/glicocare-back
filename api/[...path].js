@@ -36,9 +36,9 @@ const recordSchema = z.object({
 const updateSchema = recordSchema.partial();
 
 function cookieOptions(maxAge = SESSION_SECONDS) {
-  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=${process.env.NODE_ENV === 'production' ? 'None' : 'Lax'}; Max-Age=${maxAge}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
 }
-function sessionCookie(token) { return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=${process.env.NODE_ENV === 'production' ? 'None' : 'Lax'}; Max-Age=${SESSION_SECONDS}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`; }
+function sessionCookie(token) { return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_SECONDS}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`; }
 function secretKey() {
   const value = process.env.JWT_SECRET;
   if (!value || Buffer.byteLength(value) < 32) throw new HttpError(503, 'Autenticação ainda não configurada. Defina JWT_SECRET com pelo menos 32 bytes.');
