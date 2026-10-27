@@ -13,7 +13,10 @@ let pool;
 function database() {
   if (!pool) {
     if (!process.env.DATABASE_URL) throw new HttpError(503, 'Banco de dados não configurado. Defina DATABASE_URL e aplique as migrações.');
-    pool = new Pool({ connectionString: process.env.DATABASE_URL, options: '-c search_path=glicocare,public', ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: true }, max: 5, idleTimeoutMillis: 10000, connectionTimeoutMillis: 7000 });
+    const databaseUrl = new URL(process.env.DATABASE_URL);
+    databaseUrl.searchParams.delete('sslmode');
+    const ca = process.env.SUPABASE_CA_CERT_BASE64 ? Buffer.from(process.env.SUPABASE_CA_CERT_BASE64, 'base64').toString('utf8') : undefined;
+    pool = new Pool({ connectionString: databaseUrl.toString(), options: '-c search_path=glicocare,public', ssl: process.env.DATABASE_SSL === 'false' ? false : { ca, rejectUnauthorized: true }, max: 5, idleTimeoutMillis: 10000, connectionTimeoutMillis: 7000 });
     pool.on('error', (error) => console.error('Falha na conexão PostgreSQL:', error.code || 'erro interno'));
   }
   return pool;

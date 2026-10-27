@@ -17,6 +17,7 @@ Não use dados reais de saúde em desenvolvimento. A aplicação não popula reg
 | Variável | Finalidade |
 | --- | --- |
 | `DATABASE_URL` | URL PostgreSQL do pooler Supavisor em modo transaction para serverless. Nunca exponha no frontend. |
+| `SUPABASE_CA_CERT_BASE64` | Certificado raiz Supabase em PEM codificado em base64, usado para verificar o TLS do PostgreSQL. |
 | `DATABASE_SSL` | Defina `false` somente para PostgreSQL local. Em produção, mantenha TLS. |
 | `JWT_SECRET` | Segredo aleatório para assinar sessões; mínimo 32 bytes. |
 | `FRONTEND_URL` | Origem exata da interface, usada no CORS, CSRF e links de e-mail. |
