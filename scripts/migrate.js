@@ -7,7 +7,7 @@ import { Pool } from 'pg';
 
 if (!process.env.DATABASE_URL) throw new Error('Defina DATABASE_URL antes de aplicar as migrações.');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: true } });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, options: '-c search_path=glicocare,public', ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: true } });
 try {
   await pool.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
   const files = (await readdir(resolve(root, 'migrations'))).filter((file) => file.endsWith('.sql')).sort();

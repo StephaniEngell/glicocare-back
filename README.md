@@ -16,7 +16,7 @@ Não use dados reais de saúde em desenvolvimento. A aplicação não popula reg
 
 | Variável | Finalidade |
 | --- | --- |
-| `DATABASE_URL` | URL de conexão PostgreSQL. Nunca exponha no frontend. |
+| `DATABASE_URL` | URL PostgreSQL do pooler Supavisor em modo transaction para serverless. Nunca exponha no frontend. |
 | `DATABASE_SSL` | Defina `false` somente para PostgreSQL local. Em produção, mantenha TLS. |
 | `JWT_SECRET` | Segredo aleatório para assinar sessões; mínimo 32 bytes. |
 | `FRONTEND_URL` | Origem exata da interface, usada no CORS, CSRF e links de e-mail. |
@@ -27,7 +27,7 @@ Não use dados reais de saúde em desenvolvimento. A aplicação não popula reg
 
 ## Migrações
 
-`npm run db:migrate` aplica arquivos SQL em ordem e registra cada migração em `schema_migrations`. Faça backup antes de mudanças em um banco de produção. A migração inicial cria usuários, pacientes, vínculos, convites, dados normalizados, lembretes, assinaturas push, entregas, auditoria, recuperação de senha e controle de tentativas.
+`npm run db:migrate` aplica arquivos SQL em ordem e registra cada migração em `schema_migrations`. Faça backup antes de mudanças em um banco de produção. A migração inicial cria usuários, pacientes, vínculos, convites, dados normalizados, lembretes, assinaturas push, entregas, auditoria, recuperação de senha e controle de tentativas no schema privado `glicocare`, fora dos schemas expostos pela API automática do Supabase. O backend usa o papel `glicocare_runtime`, com acesso somente às tabelas e sequências da aplicação.
 
 ## API
 

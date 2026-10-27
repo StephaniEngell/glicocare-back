@@ -1,3 +1,6 @@
+CREATE SCHEMA IF NOT EXISTS glicocare;
+SET search_path TO glicocare, public;
+
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name varchar(120) NOT NULL CHECK (length(trim(name)) >= 2),
