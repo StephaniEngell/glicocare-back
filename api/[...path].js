@@ -45,6 +45,16 @@ function secretKey() {
   return new TextEncoder().encode(value);
 }
 function sha256(value) { return createHash('sha256').update(value).digest('hex'); }
+function generateRecoveryCodes() {
+  return Array.from({ length: 10 }, () => randomBytes(16).toString('hex').toUpperCase().match(/.{4}/g).join('-'));
+}
+function normalizedRecoveryCode(value) {
+  const code = String(value).replace(/[\s-]/g, '').toUpperCase();
+  return /^[0-9A-F]{32}$/.test(code) ? code : null;
+}
+async function storeRecoveryCodes(client, userId, codes) {
+  for (const code of codes) await client.query('INSERT INTO recovery_codes (user_id,code_hash) VALUES ($1,$2)', [userId, sha256(normalizedRecoveryCode(code))]);
+}
 function safeEqual(left, right) { const a = Buffer.from(String(left)); const b = Buffer.from(String(right)); return a.length === b.length && timingSafeEqual(a, b); }
 function parseCookies(header = '') { return Object.fromEntries(header.split(';').map((part) => part.trim()).filter(Boolean).map((part) => { const index = part.indexOf('='); return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))]; })); }
 function send(res, status, body, headers = {}) { res.statusCode = status; res.setHeader('Content-Type', 'application/json; charset=utf-8'); Object.entries(headers).forEach(([key, value]) => res.setHeader(key, value)); res.end(JSON.stringify(body)); }
@@ -71,7 +81,7 @@ async function rateLimit(req, key, max = 20, minutes = 60) {
   if (Number(result.rows[0].attempts) > max) throw new HttpError(429, 'Muitas tentativas. Aguarde antes de tentar novamente.');
 }
 async function issueSession(res, user) {
-  const token = await new SignJWT({ email: user.email, name: user.name }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt().setExpirationTime(`${SESSION_SECONDS}s`).sign(secretKey());
+  const token = await new SignJWT({ email: user.email, name: user.name, sv: Number(user.session_version || 0) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt().setExpirationTime(`${SESSION_SECONDS}s`).sign(secretKey());
   res.setHeader('Set-Cookie', sessionCookie(token));
 }
 async function currentUser(req) {
@@ -80,9 +90,10 @@ async function currentUser(req) {
   try {
     const { payload } = await jwtVerify(token, secretKey(), { algorithms: ['HS256'] });
     if (!payload.sub) throw new Error('missing subject');
-    const result = await database().query(`SELECT u.id,u.name,u.email FROM users u WHERE u.id=$1 AND u.deleted_at IS NULL`, [payload.sub]);
+    const result = await database().query(`SELECT u.id,u.name,u.email,u.session_version FROM users u WHERE u.id=$1 AND u.deleted_at IS NULL`, [payload.sub]);
     if (!result.rowCount) throw new HttpError(401, 'Sua sessão expirou. Entre novamente.');
-    return result.rows[0];
+    if (Number(payload.sv || 0) !== Number(result.rows[0].session_version)) throw new HttpError(401, 'Sua sessão foi encerrada após uma alteração de segurança. Entre novamente.');
+    const { session_version, ...user } = result.rows[0]; return user;
   } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(401, 'Sua sessão expirou. Entre novamente.'); }
 }
 async function patientForUser(userId, requestedId) {
@@ -218,19 +229,20 @@ async function handle(req, res) {
   if (path === '/openapi.json' && method === 'GET') { send(res, 200, openApi); return; }
 
   if (path === '/auth/register' && method === 'POST') {
-    secretKey(); await rateLimit(req, 'register', 5); const data = validate(registerSchema, await readBody(req)); const hash = await bcrypt.hash(data.password, 12);
+    secretKey(); await rateLimit(req, 'register', 5); const data = validate(registerSchema, await readBody(req)); const hash = await bcrypt.hash(data.password, 12); const recoveryCodes = generateRecoveryCodes();
     const user = await withTransaction(async (client) => {
       const existing = await client.query('SELECT id FROM users WHERE email=$1', [data.email]); if (existing.rowCount) throw new HttpError(409, 'Este e-mail já possui uma conta.');
-      const inserted = await client.query('INSERT INTO users (name,email,password_hash) VALUES ($1,$2,$3) RETURNING id,name,email', [data.name, data.email, hash]);
+      const inserted = await client.query('INSERT INTO users (name,email,password_hash) VALUES ($1,$2,$3) RETURNING id,name,email,session_version', [data.name, data.email, hash]);
+      await storeRecoveryCodes(client, inserted.rows[0].id, recoveryCodes);
       const patient = await client.query('INSERT INTO patients (name,timezone) VALUES ($1,$2) RETURNING id', [data.patientName, process.env.DEFAULT_TIMEZONE || 'America/Sao_Paulo']);
       await client.query("INSERT INTO memberships (patient_id,user_id,role,status) VALUES ($1,$2,'owner','active')", [patient.rows[0].id, inserted.rows[0].id]);
       await client.query("INSERT INTO reminders (patient_id,local_time,timezone,enabled) VALUES ($1,'22:00',$2,false)", [patient.rows[0].id, process.env.DEFAULT_TIMEZONE || 'America/Sao_Paulo']);
       await audit(client, patient.rows[0].id, inserted.rows[0].id, 'created', 'patient', patient.rows[0].id, ['acompanhamento']); return inserted.rows[0];
     });
-    await issueSession(res, user); send(res, 201, { user }); return;
+    await issueSession(res, user); send(res, 201, { user: { id: user.id, name: user.name, email: user.email }, recoveryCodes }, { 'Cache-Control': 'no-store' }); return;
   }
   if (path === '/auth/login' && method === 'POST') {
-    secretKey(); await rateLimit(req, 'login', 10); const data = validate(loginSchema, await readBody(req)); const result = await database().query('SELECT id,name,email,password_hash FROM users WHERE email=$1 AND deleted_at IS NULL', [data.email]);
+    secretKey(); await rateLimit(req, 'login', 10); const data = validate(loginSchema, await readBody(req)); const result = await database().query('SELECT id,name,email,password_hash,session_version FROM users WHERE email=$1 AND deleted_at IS NULL', [data.email]);
     const user = result.rows[0]; if (!user || !(await bcrypt.compare(data.password, user.password_hash))) throw new HttpError(401, 'E-mail ou senha incorretos.');
     await issueSession(res, user); send(res, 200, { user: { id: user.id, name: user.name, email: user.email } }); return;
   }
@@ -247,9 +259,26 @@ async function handle(req, res) {
     }
     send(res, 200, { message: 'Se esse e-mail estiver cadastrado, enviaremos um link de recuperação.' }); return;
   }
+  if (path === '/auth/password/recover-code' && method === 'POST') {
+    await rateLimit(req, 'password-recovery-code', 5); const data = validate(z.object({ email: emailSchema, code: z.string().trim().min(32).max(40), password: passwordSchema }), await readBody(req)); const normalizedCode = normalizedRecoveryCode(data.code);
+    if (!normalizedCode) throw new HttpError(401, 'E-mail ou código de recuperação inválido.');
+    const passwordHash = await bcrypt.hash(data.password, 12);
+    const recoveryCodes = await withTransaction(async (client) => {
+      const account = await client.query(`SELECT u.id FROM users u JOIN recovery_codes r ON r.user_id=u.id
+        WHERE u.email=$1 AND u.deleted_at IS NULL AND r.code_hash=$2 FOR UPDATE OF u,r`, [data.email, sha256(normalizedCode)]);
+      if (!account.rowCount) throw new HttpError(401, 'E-mail ou código de recuperação inválido.');
+      const codes = generateRecoveryCodes();
+      await client.query('DELETE FROM recovery_codes WHERE user_id=$1', [account.rows[0].id]);
+      await storeRecoveryCodes(client, account.rows[0].id, codes);
+      await client.query('UPDATE users SET password_hash=$1,updated_at=now(),session_version=session_version+1 WHERE id=$2', [passwordHash, account.rows[0].id]);
+      await client.query('UPDATE password_resets SET used_at=now() WHERE user_id=$1 AND used_at IS NULL', [account.rows[0].id]);
+      return codes;
+    });
+    res.setHeader('Set-Cookie', cookieOptions(0)); send(res, 200, { message: 'Senha redefinida. Guarde os novos códigos antes de entrar.', recoveryCodes }, { 'Cache-Control': 'no-store' }); return;
+  }
   if (path === '/auth/password/reset' && method === 'POST') {
     const data = validate(z.object({ token: z.string().min(32).max(128), password: passwordSchema }), await readBody(req)); const hash = await bcrypt.hash(data.password, 12);
-    await withTransaction(async (client) => { const reset = await client.query('SELECT id,user_id FROM password_resets WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE', [sha256(data.token)]); if (!reset.rowCount) throw new HttpError(400, 'Este link expirou ou já foi utilizado.'); await client.query('UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2', [hash, reset.rows[0].user_id]); await client.query('UPDATE password_resets SET used_at=now() WHERE user_id=$1 AND used_at IS NULL', [reset.rows[0].user_id]); });
+    await withTransaction(async (client) => { const reset = await client.query('SELECT id,user_id FROM password_resets WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE', [sha256(data.token)]); if (!reset.rowCount) throw new HttpError(400, 'Este link expirou ou já foi utilizado.'); await client.query('UPDATE users SET password_hash=$1,updated_at=now(),session_version=session_version+1 WHERE id=$2', [hash, reset.rows[0].user_id]); await client.query('UPDATE password_resets SET used_at=now() WHERE user_id=$1 AND used_at IS NULL', [reset.rows[0].user_id]); });
     send(res, 200, { message: 'Senha atualizada. Você já pode entrar com a nova senha.' }); return;
   }
   if (path === '/jobs/reminders' && method === 'GET') {
@@ -303,6 +332,13 @@ async function handle(req, res) {
   }
 
   const user = await currentUser(req); const db = database();
+  if (path === '/auth/recovery-codes' && method === 'GET') { const result = await db.query('SELECT COUNT(*)::int AS remaining FROM recovery_codes WHERE user_id=$1', [user.id]); send(res, 200, { remaining: result.rows[0].remaining }); return; }
+  if (path === '/auth/recovery-codes' && method === 'POST') {
+    await rateLimit(req, 'recovery-code-issue', 5); const { currentPassword } = validate(z.object({ currentPassword: z.string().min(1).max(128) }), await readBody(req)); const account = await db.query('SELECT password_hash FROM users WHERE id=$1 AND deleted_at IS NULL', [user.id]);
+    if (!account.rowCount || !(await bcrypt.compare(currentPassword, account.rows[0].password_hash))) throw new HttpError(401, 'A senha atual está incorreta.');
+    const codes = generateRecoveryCodes(); await withTransaction(async (client) => { await client.query('DELETE FROM recovery_codes WHERE user_id=$1', [user.id]); await storeRecoveryCodes(client, user.id, codes); const patient = await client.query("SELECT patient_id FROM memberships WHERE user_id=$1 AND status='active' ORDER BY joined_at DESC LIMIT 1", [user.id]); if (patient.rowCount) await audit(client, patient.rows[0].patient_id, user.id, 'updated', 'recovery_codes', 'reissued', ['códigos de recuperação']); });
+    send(res, 201, { recoveryCodes: codes }, { 'Cache-Control': 'no-store' }); return;
+  }
   if (path === '/patients/current' && method === 'GET') { const patient = await patientForUser(user.id, url.searchParams.get('patientId')); send(res, 200, { patient }); return; }
   if (path === '/records' && method === 'GET') {
     const patient = await patientForUser(user.id, url.searchParams.get('patientId')); const limitRaw = Number(url.searchParams.get('limit') || 100); const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 100;
@@ -364,6 +400,8 @@ const openApi = { openapi: '3.1.0', info: { title: 'GlicoCare API', version: '1.
   '/auth/me': { get: { summary: 'Consultar sessão', responses: { 200: { description: 'Usuário atual' } } } },
   '/auth/password/forgot': { post: { summary: 'Enviar link de recuperação de senha', responses: { 200: { description: 'Pedido recebido' } } } },
   '/auth/password/reset': { post: { summary: 'Redefinir senha com token de uso único', responses: { 200: { description: 'Senha atualizada' }, 400: { description: 'Token expirado ou inválido' } } } },
+  '/auth/password/recover-code': { post: { summary: 'Redefinir senha usando um código de recuperação', responses: { 200: { description: 'Senha redefinida e novos códigos emitidos' }, 401: { description: 'E-mail ou código inválido' } } } },
+  '/auth/recovery-codes': { get: { summary: 'Consultar quantidade de códigos disponíveis', responses: { 200: { description: 'Quantidade disponível' } } }, post: { summary: 'Gerar ou substituir códigos de recuperação', responses: { 201: { description: 'Novos códigos emitidos' } } } },
   '/records': { get: { summary: 'Listar registros', parameters: [{ name:'from',in:'query',schema:{type:'string',format:'date'} },{ name:'to',in:'query',schema:{type:'string',format:'date'} },{ name:'limit',in:'query',schema:{type:'integer',maximum:200} }], responses:{200:{description:'Histórico autorizado'}} }, post:{summary:'Criar registro de cuidado',responses:{201:{description:'Registro persistido'},422:{description:'Dados inválidos'}}} },
   '/records/{id}': { patch:{summary:'Atualizar registro',responses:{200:{description:'Atualizado'},404:{description:'Não encontrado'}}}, delete:{summary:'Excluir registro com auditoria',responses:{204:{description:'Excluído'}}} },
   '/reports/month': { get:{summary:'Resumo estatístico descritivo mensal',responses:{200:{description:'Resumo autorizado'}}} },
