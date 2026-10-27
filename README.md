@@ -36,7 +36,7 @@ Não use dados reais de saúde em desenvolvimento. A aplicação não popula reg
 
 Rotas principais: `/auth/register`, `/auth/login`, `/auth/logout`, `/auth/me`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/password/recover-code`, `/auth/recovery-codes`, `/patients/current`, `/records`, `/records/:id`, `/reports/month`, `/reports/month/pdf`, `/sharing`, `/invites`, `/invites/accept`, `/reminders`, `/push/subscriptions` e `/jobs/reminders`.
 
-Todas as operações de saúde exigem sessão e vínculo ativo no servidor. Uma conta pode ser responsável por um acompanhamento e aceitar convite para outro. Cada paciente aceita um responsável principal e até uma pessoa cuidadora. Senhas são armazenadas com bcrypt; tokens de convite, links de redefinição e códigos de recuperação são guardados como hash e têm uso único/expiração ou rotação. Uma recuperação de senha incrementa a versão da sessão para encerrar sessões anteriores. Valores ausentes permanecem `NULL`; aplicação pendente não possui dose nem horário de aplicação.
+Todas as operações de saúde exigem sessão e vínculo ativo no servidor. Uma conta pode ser responsável por um acompanhamento e aceitar convite para outro. Cada paciente aceita um responsável principal e até duas cuidadoras. Ao criar conta por convite, o cadastro aceita o vínculo com o paciente compartilhado na mesma transação e não cria um acompanhamento próprio. Senhas são armazenadas com bcrypt; tokens de convite, links de redefinição e códigos de recuperação são guardados como hash e têm uso único/expiração ou rotação. Uma recuperação de senha incrementa a versão da sessão para encerrar sessões anteriores. Valores ausentes permanecem `NULL`; aplicação pendente não possui dose nem horário de aplicação.
 
 ## Vercel
 

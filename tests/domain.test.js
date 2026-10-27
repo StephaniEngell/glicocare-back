@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dateMonthBounds, localToUtc, dateInTimezone, validateTimezone, eventJson, recordSchema, handler, MAX_SHARING_MEMBERS, hasSharingCapacity } from '../api/[...path].js';
+import { dateMonthBounds, localToUtc, dateInTimezone, validateTimezone, eventJson, recordSchema, registerSchema, handler, MAX_SHARING_MEMBERS, hasSharingCapacity } from '../api/[...path].js';
 
 test('mês local respeita número de dias e fronteira do fuso', () => {
   const range = dateMonthBounds('2024-02', 'America/Sao_Paulo');
@@ -40,4 +40,11 @@ test('compartilhamento permite responsável e duas cuidadoras, reservando vagas 
   assert.equal(hasSharingCapacity(1, 1), true);
   assert.equal(hasSharingCapacity(1, 2), false);
   assert.equal(hasSharingCapacity(2, 1), false);
+});
+test('cadastro por convite não exige nome de paciente próprio', () => {
+  const invited = registerSchema.parse({ name: 'Cuidadora', email: 'CUidadora@example.com', password: 'Senha-de-teste-123', inviteToken: 'A'.repeat(43) });
+  assert.equal(invited.patientName, undefined);
+  assert.equal(invited.email, 'cuidadora@example.com');
+  assert.throws(() => registerSchema.parse({ name: 'Responsável', email: 'responsavel@example.com', password: 'Senha-de-teste-123' }), /Informe o nome da pessoa acompanhada/);
+  assert.doesNotThrow(() => registerSchema.parse({ name: 'Responsável', patientName: 'Paciente', email: 'responsavel@example.com', password: 'Senha-de-teste-123' }));
 });
