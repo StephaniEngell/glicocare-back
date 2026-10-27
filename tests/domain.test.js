@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dateMonthBounds, localToUtc, dateInTimezone, validateTimezone, eventJson, recordSchema, handler } from '../api/[...path].js';
+import { dateMonthBounds, localToUtc, dateInTimezone, validateTimezone, eventJson, recordSchema, handler, MAX_SHARING_MEMBERS, hasSharingCapacity } from '../api/[...path].js';
 
 test('mês local respeita número de dias e fronteira do fuso', () => {
   const range = dateMonthBounds('2024-02', 'America/Sao_Paulo');
@@ -31,4 +31,13 @@ test('rotas de saúde negam acesso sem sessão antes de consultar o banco', asyn
   const req = { method: 'GET', url: '/api/patients/current', headers: {}, socket: {}, async *[Symbol.asyncIterator]() {} };
   const res = response(); await handler(req, res);
   assert.equal(res.statusCode, 401); assert.match(JSON.parse(res.body).message, /Entre na sua conta/);
+});
+test('compartilhamento permite responsável e duas cuidadoras, reservando vagas para convites pendentes', () => {
+  assert.equal(MAX_SHARING_MEMBERS, 3);
+  assert.equal(hasSharingCapacity(1), true);
+  assert.equal(hasSharingCapacity(2), true);
+  assert.equal(hasSharingCapacity(3), false);
+  assert.equal(hasSharingCapacity(1, 1), true);
+  assert.equal(hasSharingCapacity(1, 2), false);
+  assert.equal(hasSharingCapacity(2, 1), false);
 });

@@ -9,6 +9,7 @@ import { Resend } from 'resend';
 
 const SESSION_COOKIE = 'glicocare_session';
 const SESSION_SECONDS = 60 * 60 * 12;
+export const MAX_SHARING_MEMBERS = 3;
 let pool;
 function database() {
   if (!pool) {
@@ -22,6 +23,9 @@ function database() {
   return pool;
 }
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+export function hasSharingCapacity(activeMembers, pendingInvitations = 0) {
+  return activeMembers + pendingInvitations < MAX_SHARING_MEMBERS;
+}
 const emailSchema = z.string().trim().email().max(254).transform((value) => value.toLowerCase());
 const passwordSchema = z.string().min(10).max(128);
 const registerSchema = z.object({ name: z.string().trim().min(2).max(120), patientName: z.string().trim().min(2).max(120), email: emailSchema, password: passwordSchema });
@@ -366,18 +370,43 @@ async function handle(req, res) {
     res.statusCode = 200; res.setHeader('Content-Type','application/pdf'); res.setHeader('Content-Disposition',`attachment; filename="glicocare-relatorio-${month}.pdf"`); res.end(Buffer.concat(chunks)); return;
   }
   if (path === '/sharing' && method === 'GET') {
-    const patient = await patientForUser(user.id, url.searchParams.get('patientId')); const members = await db.query(`SELECT m.id,u.name,u.email,m.role,m.joined_at AS "joinedAt" FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.patient_id=$1 AND m.status='active' ORDER BY m.joined_at`, [patient.id]); send(res, 200, { members: members.rows }); return;
+    const patient = await patientForUser(user.id, url.searchParams.get('patientId')); const [members, pending] = await Promise.all([
+      db.query(`SELECT m.id,u.name,u.email,m.role,m.joined_at AS "joinedAt" FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.patient_id=$1 AND m.status='active' ORDER BY m.joined_at`, [patient.id]),
+      db.query("SELECT COUNT(*)::int AS total FROM invitations WHERE patient_id=$1 AND status='pending' AND expires_at>now()", [patient.id]),
+    ]); send(res, 200, { members: members.rows, pendingInvitations: Number(pending.rows[0].total) }); return;
   }
   if (path === '/invites' && method === 'POST') {
     const patient = await patientForUser(user.id, url.searchParams.get('patientId')); if (patient.role !== 'owner') throw new HttpError(403, 'Somente o responsável principal pode convidar pessoas.');
-    await readBody(req); const raw = randomBytes(32).toString('base64url'); const urlToAccept = `${publicBaseUrl()}/?convite=${raw}`;
-    const count = await db.query("SELECT COUNT(*)::int AS total FROM memberships WHERE patient_id=$1 AND status='active'", [patient.id]); if (Number(count.rows[0].total) >= 2) throw new HttpError(409, 'Este acompanhamento já possui duas pessoas autorizadas.');
-    const expiresAt = new Date(Date.now() + 7 * 86400_000); await db.query("INSERT INTO invitations (patient_id,email,role,token_hash,expires_at,created_by) VALUES ($1,NULL,'caregiver',$2,$3,$4)", [patient.id, sha256(raw), expiresAt, user.id]);
-    await withTransaction((client) => audit(client, patient.id, user.id, 'created', 'invitation', 'pending', ['convite de cuidador']));
-    send(res, 201, { message: 'Link de convite criado. Ele expira em 7 dias e só pode ser usado uma vez.', inviteUrl: urlToAccept }); return;
+    await readBody(req);
+    const invitation = await withTransaction(async (client) => {
+      const lockedPatient = await client.query('SELECT id FROM patients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [patient.id]);
+      if (!lockedPatient.rowCount) throw new HttpError(404, 'Acompanhamento não encontrado.');
+      const capacity = await client.query(`SELECT
+        (SELECT COUNT(*)::int FROM memberships WHERE patient_id=$1 AND status='active') AS active_members,
+        (SELECT COUNT(*)::int FROM invitations WHERE patient_id=$1 AND status='pending' AND expires_at>now()) AS pending_invitations`, [patient.id]);
+      if (!hasSharingCapacity(Number(capacity.rows[0].active_members), Number(capacity.rows[0].pending_invitations))) {
+        throw new HttpError(409, 'O limite é de três pessoas no total: responsável e até duas cuidadoras. Convites pendentes também reservam uma vaga.');
+      }
+      const raw = randomBytes(32).toString('base64url'); const expiresAt = new Date(Date.now() + 7 * 86400_000);
+      await client.query("INSERT INTO invitations (patient_id,email,role,token_hash,expires_at,created_by) VALUES ($1,NULL,'caregiver',$2,$3,$4)", [patient.id, sha256(raw), expiresAt, user.id]);
+      await audit(client, patient.id, user.id, 'created', 'invitation', 'pending', ['convite de cuidador']);
+      return { inviteUrl: `${publicBaseUrl()}/?convite=${raw}` };
+    });
+    send(res, 201, { message: 'Link de convite criado. Ele expira em 7 dias e só pode ser usado uma vez.', inviteUrl: invitation.inviteUrl }); return;
   }
   if (path === '/invites/accept' && method === 'POST') {
-    const { token } = validate(z.object({ token: z.string().min(32).max(128) }), await readBody(req)); const membership = await withTransaction(async (client) => { const inv = await client.query("SELECT id,patient_id,email FROM invitations WHERE token_hash=$1 AND status='pending' AND expires_at>now() FOR UPDATE", [sha256(token)]); if (!inv.rowCount) throw new HttpError(400, 'Este convite expirou ou já foi utilizado.'); if (inv.rows[0].email && inv.rows[0].email !== user.email) throw new HttpError(403, 'Este convite foi criado para outra conta.'); const count = await client.query("SELECT COUNT(*)::int AS total FROM memberships WHERE patient_id=$1 AND status='active'", [inv.rows[0].patient_id]); if (Number(count.rows[0].total) >= 2) throw new HttpError(409, 'Este acompanhamento já atingiu o limite de pessoas.'); const inserted = await client.query("INSERT INTO memberships (patient_id,user_id,role,status) VALUES ($1,$2,'caregiver','active') ON CONFLICT (patient_id,user_id) DO UPDATE SET status='active',revoked_at=NULL RETURNING id,patient_id", [inv.rows[0].patient_id,user.id]); await client.query("UPDATE invitations SET status='accepted',accepted_at=now() WHERE id=$1", [inv.rows[0].id]); await audit(client, inv.rows[0].patient_id, user.id, 'accepted', 'invitation', inv.rows[0].id, []); return inserted.rows[0]; }); send(res, 200, { membership }); return;
+    const { token } = validate(z.object({ token: z.string().min(32).max(128) }), await readBody(req)); const membership = await withTransaction(async (client) => {
+      const inv = await client.query("SELECT id,patient_id,email FROM invitations WHERE token_hash=$1 AND status='pending' AND expires_at>now() FOR UPDATE", [sha256(token)]);
+      if (!inv.rowCount) throw new HttpError(400, 'Este convite expirou ou já foi utilizado.');
+      if (inv.rows[0].email && inv.rows[0].email !== user.email) throw new HttpError(403, 'Este convite foi criado para outra conta.');
+      const lockedPatient = await client.query('SELECT id FROM patients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [inv.rows[0].patient_id]);
+      if (!lockedPatient.rowCount) throw new HttpError(404, 'Acompanhamento não encontrado.');
+      const count = await client.query("SELECT COUNT(*)::int AS total FROM memberships WHERE patient_id=$1 AND status='active'", [inv.rows[0].patient_id]);
+      if (!hasSharingCapacity(Number(count.rows[0].total))) throw new HttpError(409, 'Este acompanhamento já possui o responsável e duas cuidadoras.');
+      const inserted = await client.query("INSERT INTO memberships (patient_id,user_id,role,status) VALUES ($1,$2,'caregiver','active') ON CONFLICT (patient_id,user_id) DO UPDATE SET status='active',revoked_at=NULL RETURNING id,patient_id", [inv.rows[0].patient_id,user.id]);
+      await client.query("UPDATE invitations SET status='accepted',accepted_at=now() WHERE id=$1", [inv.rows[0].id]);
+      await audit(client, inv.rows[0].patient_id, user.id, 'accepted', 'invitation', inv.rows[0].id, []); return inserted.rows[0];
+    }); send(res, 200, { membership }); return;
   }
   const sharingRoute = path.match(/^\/sharing\/([0-9a-f-]{36})$/i);
   if (sharingRoute && method === 'DELETE') { const patient = await patientForUser(user.id, url.searchParams.get('patientId')); if (patient.role !== 'owner') throw new HttpError(403, 'Somente o responsável principal pode revogar o acesso.'); await withTransaction(async (client) => { const target = await client.query("UPDATE memberships SET status='revoked',revoked_at=now(),updated_at=now() WHERE id=$1 AND patient_id=$2 AND role='caregiver' AND status='active' RETURNING user_id", [sharingRoute[1], patient.id]); if (!target.rowCount) throw new HttpError(404, 'Vínculo não encontrado.'); await audit(client, patient.id, user.id, 'revoked', 'membership', sharingRoute[1], []); }); noContent(res); return; }
