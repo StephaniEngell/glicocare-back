@@ -1,0 +1,23 @@
+{
+  "name": "glicocare-back",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "db:migrate": "node scripts/migrate.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "jose": "^5.9.6",
+    "pdfkit": "^0.16.0",
+    "pg": "^8.13.1",
+    "resend": "^4.0.1",
+    "web-push": "^3.6.7",
+    "zod": "^4.6.7"
+  }
+}
