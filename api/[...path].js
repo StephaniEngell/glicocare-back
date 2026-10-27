@@ -5,7 +5,6 @@ import { SignJWT, jwtVerify } from 'jose';
 import { z } from 'zod';
 import PDFDocument from 'pdfkit';
 import webpush from 'web-push';
-import { Resend } from 'resend';
 
 const SESSION_COOKIE = 'glicocare_session';
 const SESSION_SECONDS = 60 * 60 * 12;
@@ -198,11 +197,6 @@ async function summaryFor(patient, month) {
   const row = aggregates.rows[0]; const prior = previous.rows[0]; const comparison = Number(prior.measurements) ? { previousMonth, previousMeasurementCount: Number(prior.measurements), previousMean: prior.mean == null ? null : Number(prior.mean), measurementDelta: Number(row.measurements) - Number(prior.measurements), meanDelta: row.mean == null || prior.mean == null ? null : Number((Number(row.mean) - Number(prior.mean)).toFixed(1)) } : null;
   return { month, measurementCount: Number(row.measurements), mean: row.mean == null ? null : Number(row.mean), min: row.min == null ? null : Number(row.min), max: row.max == null ? null : Number(row.max), appliedCount: Number(row.applied), sweetCount: Number(row.sweets), dayCount: Number(row.record_days), daysWithoutRecords: Math.max(0, days - Number(row.record_days)), incompleteCount: Number(row.incomplete), authorBreakdown: authors.rows, comparison, events };
 }
-async function sendEmail(to, subject, html) {
-  if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return false;
-  const client = new Resend(process.env.RESEND_API_KEY); const result = await client.emails.send({ from: process.env.EMAIL_FROM, to, subject, html });
-  if (result.error) throw new HttpError(502, 'Não foi possível entregar o e-mail agora. Tente novamente mais tarde.'); return true;
-}
 function publicBaseUrl() { return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, ''); }
 function validSubscription(value) {
   const result = z.object({ endpoint: z.string().url().max(2048), expirationTime: z.number().nullable().optional(), keys: z.object({ p256dh: z.string().min(16).max(256), auth: z.string().min(8).max(128) }) }).safeParse(value);
@@ -235,17 +229,6 @@ async function handle(req, res) {
   }
   if (path === '/auth/logout' && method === 'POST') { res.setHeader('Set-Cookie', cookieOptions(0)); noContent(res); return; }
   if (path === '/auth/me' && method === 'GET') { const user = await currentUser(req); send(res, 200, { user }); return; }
-  if (path === '/auth/password/forgot' && method === 'POST') {
-    await rateLimit(req, 'password-reset', 5); const { email } = validate(z.object({ email: emailSchema }), await readBody(req)); const result = await database().query('SELECT id FROM users WHERE email=$1 AND deleted_at IS NULL', [email]);
-    if (result.rowCount) { const raw = randomBytes(32).toString('base64url'); await database().query('INSERT INTO password_resets (user_id,token_hash,expires_at) VALUES ($1,$2,now()+interval \'1 hour\')', [result.rows[0].id, sha256(raw)]); await sendEmail(email, 'Recuperação de acesso ao GlicoCare', `<p>Para redefinir sua senha, acesse <a href="${publicBaseUrl()}/?redefinir=${raw}">este link seguro</a>. O link expira em uma hora.</p>`); }
-    send(res, 200, { message: 'Se o e-mail estiver cadastrado, você receberá as instruções de recuperação.' }); return;
-  }
-  if (path === '/auth/password/reset' && method === 'POST') {
-    const data = validate(z.object({ token: z.string().min(32).max(128), password: passwordSchema }), await readBody(req)); const hash = await bcrypt.hash(data.password, 12);
-    await withTransaction(async (client) => { const reset = await client.query('SELECT id,user_id FROM password_resets WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE', [sha256(data.token)]); if (!reset.rowCount) throw new HttpError(400, 'Este link expirou ou já foi utilizado.'); await client.query('UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2', [hash, reset.rows[0].user_id]); await client.query('UPDATE password_resets SET used_at=now() WHERE user_id=$1 AND used_at IS NULL', [reset.rows[0].user_id]); });
-    send(res, 200, { message: 'Senha atualizada. Você já pode entrar com a nova senha.' }); return;
-  }
-
   if (path === '/jobs/reminders' && method === 'GET') {
     const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''); if (!process.env.CRON_SECRET || !safeEqual(provided, process.env.CRON_SECRET)) throw new HttpError(401, 'Acesso não autorizado.');
     if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY || !process.env.VAPID_SUBJECT) throw new HttpError(503, 'Envio de notificações push não está configurado.');
@@ -328,20 +311,14 @@ async function handle(req, res) {
   }
   if (path === '/invites' && method === 'POST') {
     const patient = await patientForUser(user.id, url.searchParams.get('patientId')); if (patient.role !== 'owner') throw new HttpError(403, 'Somente o responsável principal pode convidar pessoas.');
-    if (process.env.NODE_ENV === 'production' && (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM)) throw new HttpError(503, 'O serviço de e-mail ainda não está configurado; o convite não foi criado.');
-    const { email } = validate(z.object({ email: emailSchema }), await readBody(req)); const raw = randomBytes(32).toString('base64url'); const urlToAccept = `${publicBaseUrl()}/?convite=${raw}`;
+    await readBody(req); const raw = randomBytes(32).toString('base64url'); const urlToAccept = `${publicBaseUrl()}/?convite=${raw}`;
     const count = await db.query("SELECT COUNT(*)::int AS total FROM memberships WHERE patient_id=$1 AND status='active'", [patient.id]); if (Number(count.rows[0].total) >= 2) throw new HttpError(409, 'Este acompanhamento já possui duas pessoas autorizadas.');
-    const exists = await db.query("SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.patient_id=$1 AND u.email=$2 AND m.status='active'", [patient.id, email]); if (exists.rowCount) throw new HttpError(409, 'Esta pessoa já tem acesso ao acompanhamento.');
-    const expiresAt = new Date(Date.now() + 7 * 86400_000); await db.query("INSERT INTO invitations (patient_id,email,role,token_hash,expires_at,created_by) VALUES ($1,$2,'caregiver',$3,$4,$5) ON CONFLICT (patient_id,email) WHERE status='pending' DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,created_by=EXCLUDED.created_by", [patient.id, email, sha256(raw), expiresAt, user.id]);
-    let sent = false;
-    try { sent = await sendEmail(email, 'Convite para acompanhar no GlicoCare', `<p>Você foi convidado(a) a acompanhar registros no GlicoCare.</p><p><a href="${urlToAccept}">Aceitar convite</a> · Este link expira em 7 dias e só pode ser usado pela conta ${email}.</p>`); }
-    catch (error) { await db.query("UPDATE invitations SET status='revoked' WHERE token_hash=$1 AND status='pending'", [sha256(raw)]); throw error; }
-    if (!sent && process.env.NODE_ENV === 'production') { await db.query("UPDATE invitations SET status='revoked' WHERE token_hash=$1 AND status='pending'", [sha256(raw)]); throw new HttpError(503, 'O serviço de e-mail ainda não está configurado; o convite não foi enviado.'); }
+    const expiresAt = new Date(Date.now() + 7 * 86400_000); await db.query("INSERT INTO invitations (patient_id,email,role,token_hash,expires_at,created_by) VALUES ($1,NULL,'caregiver',$2,$3,$4)", [patient.id, sha256(raw), expiresAt, user.id]);
     await withTransaction((client) => audit(client, patient.id, user.id, 'created', 'invitation', 'pending', ['convite de cuidador']));
-    send(res, 201, { message: sent ? 'Convite enviado. Ele expira em 7 dias e só pode ser aceito pela conta indicada.' : 'Convite criado para desenvolvimento. Configure o serviço de e-mail antes de usar em produção.', ...(process.env.NODE_ENV !== 'production' ? { inviteUrl: urlToAccept } : {}) }); return;
+    send(res, 201, { message: 'Link de convite criado. Ele expira em 7 dias e só pode ser usado uma vez.', inviteUrl: urlToAccept }); return;
   }
   if (path === '/invites/accept' && method === 'POST') {
-    const { token } = validate(z.object({ token: z.string().min(32).max(128) }), await readBody(req)); const membership = await withTransaction(async (client) => { const inv = await client.query("SELECT id,patient_id,email FROM invitations WHERE token_hash=$1 AND status='pending' AND expires_at>now() FOR UPDATE", [sha256(token)]); if (!inv.rowCount) throw new HttpError(400, 'Este convite expirou ou já foi utilizado.'); if (inv.rows[0].email !== user.email) throw new HttpError(403, 'Entre com o e-mail que recebeu o convite.'); const count = await client.query("SELECT COUNT(*)::int AS total FROM memberships WHERE patient_id=$1 AND status='active'", [inv.rows[0].patient_id]); if (Number(count.rows[0].total) >= 2) throw new HttpError(409, 'Este acompanhamento já atingiu o limite de pessoas.'); const inserted = await client.query("INSERT INTO memberships (patient_id,user_id,role,status) VALUES ($1,$2,'caregiver','active') ON CONFLICT (patient_id,user_id) DO UPDATE SET status='active',revoked_at=NULL RETURNING id,patient_id", [inv.rows[0].patient_id,user.id]); await client.query("UPDATE invitations SET status='accepted',accepted_at=now() WHERE id=$1", [inv.rows[0].id]); await audit(client, inv.rows[0].patient_id, user.id, 'accepted', 'invitation', inv.rows[0].id, []); return inserted.rows[0]; }); send(res, 200, { membership }); return;
+    const { token } = validate(z.object({ token: z.string().min(32).max(128) }), await readBody(req)); const membership = await withTransaction(async (client) => { const inv = await client.query("SELECT id,patient_id,email FROM invitations WHERE token_hash=$1 AND status='pending' AND expires_at>now() FOR UPDATE", [sha256(token)]); if (!inv.rowCount) throw new HttpError(400, 'Este convite expirou ou já foi utilizado.'); if (inv.rows[0].email && inv.rows[0].email !== user.email) throw new HttpError(403, 'Este convite foi criado para outra conta.'); const count = await client.query("SELECT COUNT(*)::int AS total FROM memberships WHERE patient_id=$1 AND status='active'", [inv.rows[0].patient_id]); if (Number(count.rows[0].total) >= 2) throw new HttpError(409, 'Este acompanhamento já atingiu o limite de pessoas.'); const inserted = await client.query("INSERT INTO memberships (patient_id,user_id,role,status) VALUES ($1,$2,'caregiver','active') ON CONFLICT (patient_id,user_id) DO UPDATE SET status='active',revoked_at=NULL RETURNING id,patient_id", [inv.rows[0].patient_id,user.id]); await client.query("UPDATE invitations SET status='accepted',accepted_at=now() WHERE id=$1", [inv.rows[0].id]); await audit(client, inv.rows[0].patient_id, user.id, 'accepted', 'invitation', inv.rows[0].id, []); return inserted.rows[0]; }); send(res, 200, { membership }); return;
   }
   const sharingRoute = path.match(/^\/sharing\/([0-9a-f-]{36})$/i);
   if (sharingRoute && method === 'DELETE') { const patient = await patientForUser(user.id, url.searchParams.get('patientId')); if (patient.role !== 'owner') throw new HttpError(403, 'Somente o responsável principal pode revogar o acesso.'); await withTransaction(async (client) => { const target = await client.query("UPDATE memberships SET status='revoked',revoked_at=now(),updated_at=now() WHERE id=$1 AND patient_id=$2 AND role='caregiver' AND status='active' RETURNING user_id", [sharingRoute[1], patient.id]); if (!target.rowCount) throw new HttpError(404, 'Vínculo não encontrado.'); await audit(client, patient.id, user.id, 'revoked', 'membership', sharingRoute[1], []); }); noContent(res); return; }
@@ -367,7 +344,7 @@ const openApi = { openapi: '3.1.0', info: { title: 'GlicoCare API', version: '1.
   '/reports/month': { get:{summary:'Resumo estatístico descritivo mensal',responses:{200:{description:'Resumo autorizado'}}} },
   '/reports/month/pdf': { get:{summary:'Gerar relatório PDF autorizado',responses:{200:{description:'PDF'}}} },
   '/sharing': { get:{summary:'Listar pessoas vinculadas',responses:{200:{description:'Vínculos autorizados'}}} },
-  '/invites': { post:{summary:'Convidar cuidador por e-mail',responses:{201:{description:'Convite criado'}}} },
+  '/invites': { post:{summary:'Criar link de convite para cuidador',responses:{201:{description:'Link de convite criado'}}} },
   '/invites/accept': { post:{summary:'Aceitar convite de uso único',responses:{200:{description:'Convite aceito'}}} },
   '/reminders': { get:{summary:'Consultar lembrete',responses:{200:{description:'Preferências'}}},put:{summary:'Atualizar lembrete',responses:{200:{description:'Preferências salvas'}}} },
   '/push/subscriptions': { post:{summary:'Cadastrar dispositivo para push',responses:{201:{description:'Dispositivo cadastrado'}}}

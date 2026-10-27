@@ -1,0 +1,2 @@
+ALTER TABLE invitations ALTER COLUMN email DROP NOT NULL;
+DROP TABLE IF EXISTS password_resets;
