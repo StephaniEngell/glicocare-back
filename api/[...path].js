@@ -5,6 +5,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import { z } from 'zod';
 import PDFDocument from 'pdfkit';
 import webpush from 'web-push';
+import { Resend } from 'resend';
 
 const SESSION_COOKIE = 'glicocare_session';
 const SESSION_SECONDS = 60 * 60 * 12;
@@ -198,6 +199,12 @@ async function summaryFor(patient, month) {
   return { month, measurementCount: Number(row.measurements), mean: row.mean == null ? null : Number(row.mean), min: row.min == null ? null : Number(row.min), max: row.max == null ? null : Number(row.max), appliedCount: Number(row.applied), sweetCount: Number(row.sweets), dayCount: Number(row.record_days), daysWithoutRecords: Math.max(0, days - Number(row.record_days)), incompleteCount: Number(row.incomplete), authorBreakdown: authors.rows, comparison, events };
 }
 function publicBaseUrl() { return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, ''); }
+async function sendEmail(to, subject, html) {
+  if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) throw new HttpError(503, 'O envio de e-mail ainda não está configurado.');
+  const client = new Resend(process.env.RESEND_API_KEY);
+  const result = await client.emails.send({ from: process.env.EMAIL_FROM, to, subject, html });
+  if (result.error) throw new HttpError(502, 'Não foi possível enviar o link de recuperação agora. Tente novamente mais tarde.');
+}
 function validSubscription(value) {
   const result = z.object({ endpoint: z.string().url().max(2048), expirationTime: z.number().nullable().optional(), keys: z.object({ p256dh: z.string().min(16).max(256), auth: z.string().min(8).max(128) }) }).safeParse(value);
   if (!result.success) throw new HttpError(422, 'Assinatura de notificações inválida.'); return result.data;
@@ -229,6 +236,22 @@ async function handle(req, res) {
   }
   if (path === '/auth/logout' && method === 'POST') { res.setHeader('Set-Cookie', cookieOptions(0)); noContent(res); return; }
   if (path === '/auth/me' && method === 'GET') { const user = await currentUser(req); send(res, 200, { user }); return; }
+  if (path === '/auth/password/forgot' && method === 'POST') {
+    await rateLimit(req, 'password-reset', 5); const { email } = validate(z.object({ email: emailSchema }), await readBody(req)); const result = await database().query('SELECT id FROM users WHERE email=$1 AND deleted_at IS NULL', [email]);
+    if (result.rowCount) {
+      const raw = randomBytes(32).toString('base64url'); const tokenHash = sha256(raw);
+      await database().query('INSERT INTO password_resets (user_id,token_hash,expires_at) VALUES ($1,$2,now()+interval \'1 hour\')', [result.rows[0].id, tokenHash]);
+      const link = `${publicBaseUrl()}/?redefinir=${raw}`;
+      try { await sendEmail(email, 'Recuperação de acesso ao GlicoCare', `<p>Recebemos um pedido para redefinir sua senha.</p><p><a href="${link}">Criar uma nova senha</a></p><p>Este link expira em uma hora. Se você não pediu a recuperação, ignore esta mensagem.</p>`); }
+      catch (error) { await database().query('UPDATE password_resets SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL', [tokenHash]); throw error; }
+    }
+    send(res, 200, { message: 'Se esse e-mail estiver cadastrado, enviaremos um link de recuperação.' }); return;
+  }
+  if (path === '/auth/password/reset' && method === 'POST') {
+    const data = validate(z.object({ token: z.string().min(32).max(128), password: passwordSchema }), await readBody(req)); const hash = await bcrypt.hash(data.password, 12);
+    await withTransaction(async (client) => { const reset = await client.query('SELECT id,user_id FROM password_resets WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE', [sha256(data.token)]); if (!reset.rowCount) throw new HttpError(400, 'Este link expirou ou já foi utilizado.'); await client.query('UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2', [hash, reset.rows[0].user_id]); await client.query('UPDATE password_resets SET used_at=now() WHERE user_id=$1 AND used_at IS NULL', [reset.rows[0].user_id]); });
+    send(res, 200, { message: 'Senha atualizada. Você já pode entrar com a nova senha.' }); return;
+  }
   if (path === '/jobs/reminders' && method === 'GET') {
     const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''); if (!process.env.CRON_SECRET || !safeEqual(provided, process.env.CRON_SECRET)) throw new HttpError(401, 'Acesso não autorizado.');
     if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY || !process.env.VAPID_SUBJECT) throw new HttpError(503, 'Envio de notificações push não está configurado.');
@@ -339,6 +362,8 @@ const openApi = { openapi: '3.1.0', info: { title: 'GlicoCare API', version: '1.
   '/auth/login': { post: { summary: 'Entrar', responses: { 200: { description: 'Sessão criada' }, 401: { description: 'Credenciais inválidas' } } } },
   '/auth/logout': { post: { summary: 'Encerrar sessão', responses: { 204: { description: 'Sessão encerrada' } } } },
   '/auth/me': { get: { summary: 'Consultar sessão', responses: { 200: { description: 'Usuário atual' } } } },
+  '/auth/password/forgot': { post: { summary: 'Enviar link de recuperação de senha', responses: { 200: { description: 'Pedido recebido' } } } },
+  '/auth/password/reset': { post: { summary: 'Redefinir senha com token de uso único', responses: { 200: { description: 'Senha atualizada' }, 400: { description: 'Token expirado ou inválido' } } } },
   '/records': { get: { summary: 'Listar registros', parameters: [{ name:'from',in:'query',schema:{type:'string',format:'date'} },{ name:'to',in:'query',schema:{type:'string',format:'date'} },{ name:'limit',in:'query',schema:{type:'integer',maximum:200} }], responses:{200:{description:'Histórico autorizado'}} }, post:{summary:'Criar registro de cuidado',responses:{201:{description:'Registro persistido'},422:{description:'Dados inválidos'}}} },
   '/records/{id}': { patch:{summary:'Atualizar registro',responses:{200:{description:'Atualizado'},404:{description:'Não encontrado'}}}, delete:{summary:'Excluir registro com auditoria',responses:{204:{description:'Excluído'}}} },
   '/reports/month': { get:{summary:'Resumo estatístico descritivo mensal',responses:{200:{description:'Resumo autorizado'}}} },

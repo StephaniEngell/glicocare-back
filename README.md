@@ -20,22 +20,23 @@ Não use dados reais de saúde em desenvolvimento. A aplicação não popula reg
 | `SUPABASE_CA_CERT_BASE64` | Certificado raiz Supabase em PEM codificado em base64, usado para verificar o TLS do PostgreSQL. |
 | `DATABASE_SSL` | Defina `false` somente para PostgreSQL local. Em produção, mantenha TLS. |
 | `JWT_SECRET` | Segredo aleatório para assinar sessões; mínimo 32 bytes. |
-| `FRONTEND_URL` | Origem exata da interface, usada no CORS, CSRF e links de convite. |
+| `FRONTEND_URL` | Origem exata da interface, usada no CORS, CSRF e links de convite e recuperação. |
+| `RESEND_API_KEY`, `EMAIL_FROM` | Envio de links de recuperação de senha. Use um remetente de domínio verificado; `onboarding@resend.dev` é limitado a testes para o e-mail da conta Resend. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Chaves Web Push. Gere um par VAPID e mantenha a privada somente no backend. |
 | `CRON_SECRET` | Segredo Bearer para proteger `/api/jobs/reminders`. |
 | `DEFAULT_TIMEZONE` | Fuso IANA no cadastro; padrão `America/Sao_Paulo`. |
 
 ## Migrações
 
-`npm run db:migrate` aplica arquivos SQL em ordem e registra cada migração em `schema_migrations`. Faça backup antes de mudanças em um banco de produção. As migrações criam usuários, pacientes, vínculos, convites, dados normalizados, lembretes, assinaturas push, entregas, auditoria e controle de tentativas no schema privado `glicocare`, fora dos schemas expostos pela API automática do Supabase. Convites são links de uso único com validade de sete dias, compartilhados manualmente; a API não envia e-mails nem oferece recuperação de senha por e-mail. O backend usa o papel `glicocare_runtime`, com acesso somente às tabelas e sequências da aplicação. Esse papel não tem permissões DDL; em produção, aplique migrações com o usuário administrativo do Supabase, nunca com a URL de runtime da Vercel.
+`npm run db:migrate` aplica arquivos SQL em ordem e registra cada migração em `schema_migrations`. Faça backup antes de mudanças em um banco de produção. As migrações criam usuários, pacientes, vínculos, convites, dados normalizados, lembretes, assinaturas push, entregas, auditoria, recuperação de senha e controle de tentativas no schema privado `glicocare`, fora dos schemas expostos pela API automática do Supabase. Convites são links de uso único com validade de sete dias, compartilhados manualmente; a API só envia e-mails para recuperação de senha. O backend usa o papel `glicocare_runtime`, com acesso somente às tabelas e sequências da aplicação. Esse papel não tem permissões DDL; em produção, aplique migrações com o usuário administrativo do Supabase, nunca com a URL de runtime da Vercel.
 
 ## API
 
 `GET /api/openapi.json` publica a especificação OpenAPI. `GET /api/health` verifica o serviço e informa somente se a variável de banco existe; não valida conectividade nem revela credenciais.
 
-Rotas principais: `/auth/register`, `/auth/login`, `/auth/logout`, `/auth/me`, `/patients/current`, `/records`, `/records/:id`, `/reports/month`, `/reports/month/pdf`, `/sharing`, `/invites`, `/invites/accept`, `/reminders`, `/push/subscriptions` e `/jobs/reminders`.
+Rotas principais: `/auth/register`, `/auth/login`, `/auth/logout`, `/auth/me`, `/auth/password/forgot`, `/auth/password/reset`, `/patients/current`, `/records`, `/records/:id`, `/reports/month`, `/reports/month/pdf`, `/sharing`, `/invites`, `/invites/accept`, `/reminders`, `/push/subscriptions` e `/jobs/reminders`.
 
-Todas as operações de saúde exigem sessão e vínculo ativo no servidor. Uma conta pode ser responsável por um acompanhamento e aceitar convite para outro. Cada paciente aceita um responsável principal e até uma pessoa cuidadora. Senhas são armazenadas com bcrypt; tokens de convite são guardados como hash e têm uso único/expiração. Valores ausentes permanecem `NULL`; aplicação pendente não possui dose nem horário de aplicação.
+Todas as operações de saúde exigem sessão e vínculo ativo no servidor. Uma conta pode ser responsável por um acompanhamento e aceitar convite para outro. Cada paciente aceita um responsável principal e até uma pessoa cuidadora. Senhas são armazenadas com bcrypt; tokens de convite e de recuperação são guardados como hash e têm uso único/expiração. Valores ausentes permanecem `NULL`; aplicação pendente não possui dose nem horário de aplicação.
 
 ## Vercel
 
