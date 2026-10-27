@@ -28,7 +28,7 @@ Não use dados reais de saúde em desenvolvimento. A aplicação não popula reg
 
 ## Migrações
 
-`npm run db:migrate` aplica arquivos SQL em ordem e registra cada migração em `schema_migrations`. Faça backup antes de mudanças em um banco de produção. A migração inicial cria usuários, pacientes, vínculos, convites, dados normalizados, lembretes, assinaturas push, entregas, auditoria, recuperação de senha e controle de tentativas no schema privado `glicocare`, fora dos schemas expostos pela API automática do Supabase. O backend usa o papel `glicocare_runtime`, com acesso somente às tabelas e sequências da aplicação.
+`npm run db:migrate` aplica arquivos SQL em ordem e registra cada migração em `schema_migrations`. Faça backup antes de mudanças em um banco de produção. A migração inicial cria usuários, pacientes, vínculos, convites, dados normalizados, lembretes, assinaturas push, entregas, auditoria, recuperação de senha e controle de tentativas no schema privado `glicocare`, fora dos schemas expostos pela API automática do Supabase. O backend usa o papel `glicocare_runtime`, com acesso somente às tabelas e sequências da aplicação. Esse papel não tem permissões DDL; em produção, aplique migrações com o usuário administrativo do Supabase, nunca com a URL de runtime da Vercel.
 
 ## API
 
@@ -40,11 +40,11 @@ Todas as operações de saúde exigem sessão e vínculo ativo no servidor. Uma 
 
 ## Vercel
 
-Crie um projeto Vercel conectado a este repositório, com diretório raiz do repositório. O handler Node.js está em `api/[...path].js`. O `vercel.json` padrão não registra cron para continuar publicável em contas Hobby. Configure as variáveis acima no projeto e execute `npm run db:migrate` contra a base de produção antes de ativar tráfego.
+O projeto de produção usa Supabase PostgreSQL pelo pooler Supavisor em modo transaction, com verificação TLS pela CA Supabase. As tabelas ficam no schema privado `glicocare`; mantenha esse schema fora dos schemas expostos pelo Data API. As migrações `001_initial.sql` e `002_private_schema.sql` já foram aplicadas. O handler Node.js está em `api/[...path].js`; o `vercel.json` padrão não registra cron para continuar publicável em contas Hobby.
 
 O endpoint de agendamento só envia notificações se `DATABASE_URL`, `CRON_SECRET`, `VAPID_*` e assinaturas válidas estiverem configurados. Ele é autenticado com `Authorization: Bearer <CRON_SECRET>`. A chave por lembrete/data evita envio duplicado no mesmo dia; cada dispositivo possui estado de entrega e até três tentativas com intervalo controlado para falhas transitórias. Assinaturas inválidas são revogadas e ocorrências atrasadas no mesmo dia podem ser recuperadas.
 
-O arquivo opcional `vercel.pro.json` registra execução a cada minuto, necessária para respeitar horários locais distintos; use seu conteúdo no `vercel.json` somente em plano Pro/Enterprise ou conecte um agendador externo com intervalo por minuto. A Vercel Hobby limita cron a uma execução diária e rejeita expressões mais frequentes. Verifique [limites e preços da Vercel](https://vercel.com/docs/cron-jobs/usage-and-pricing) antes de ativar lembretes em produção. O provedor PostgreSQL é escolhido pela equipe; no Marketplace da Vercel há opções como Neon e Supabase, com faturamento e limites próprios. Confira os preços do [Marketplace da Vercel](https://vercel.com/marketplace) e do serviço de e-mail escolhido antes de provisionar recursos.
+O arquivo opcional `vercel.pro.json` registra execução a cada minuto, necessária para respeitar horários locais distintos; use seu conteúdo no `vercel.json` somente em plano Pro/Enterprise ou conecte um agendador externo com intervalo por minuto. A Vercel Hobby limita cron a uma execução diária e rejeita expressões mais frequentes. Verifique [limites e preços da Vercel](https://vercel.com/docs/cron-jobs/usage-and-pricing) antes de ativar lembretes em produção.
 
 ## Privacidade, retenção e limitações
 
